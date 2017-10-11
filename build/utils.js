@@ -1,5 +1,6 @@
 var path = require('path');
 var glob = require('glob');
+var SpritesmithPlugin = require('webpack-spritesmith'); // 处理雪碧图
 var config = require('../config');
 var HtmlWebpackPlugin = require('html-webpack-plugin')
 var ExtractTextPlugin = require('extract-text-webpack-plugin');
@@ -97,7 +98,6 @@ function getFiles(cwd, fileType, ignore) {
     }),
     filesJson = {};
 
-  console.log(files);
   files.forEach(function(filepath) {
 
     var name = '';
@@ -107,6 +107,7 @@ function getFiles(cwd, fileType, ignore) {
         .split('/');
     let len = nameAry.length;
 
+    // 如果为公共文件名或子目录同名时，对应关系为：{ 子目录名：路径 }或者{子目录名/子目录名(n个)/文件名：路径}
     if(len !== 1
       && (nameAry[len-1] === nameAry[len-2]
       || nameAry[len-1] === config.commFileName)) {
@@ -120,7 +121,6 @@ function getFiles(cwd, fileType, ignore) {
     filesJson[name] = `${cwd}/${filepath}`;;
   });
 
-  console.log(filesJson);
   return filesJson;
 }
 
@@ -133,29 +133,49 @@ exports.getEntries = function () {
 exports.htmlPlugins = function () {
   var tplObj = getFiles(config.tplPath, 'ejs', config.ignore);
   var entries = getFiles(config.entryPath, 'js', config.ignore);
+
+  console.log('模板文件：');
+  console.log(tplObj);
+  console.log('入口文件：');
+  console.log(entries);
   var plugins = [];
+
+  console.log('模板文件注入的入口文件情况');
   Object.keys(tplObj).forEach(function(name) {
     var chunks = [];
     if(process.env.NODE_ENV === 'production') {
-      chunks = chunks.concat(['vendor', 'manifest']);
+      chunks = chunks.concat(['manifest', 'vendor']);
     }
     chunks.push(config.commFileName);
-    // 允许多个模板文件对应同一入口文件
-    Object.keys(entries).forEach(function (name2) {
-      if(name.includes(name2) && name2 !== name) {
-        chunks.push(name2);
-      }
-    })
-    Object.keys(entries).forEach(function (name2) {
-      if(name2 === name) {
+    /**
+     * 1, 允许多个模板文件对应同一入口文件
+     * 2, 排序entrieKeys保证入口文件的顺序，如subdir应该在subdir/a前面
+     * @type {Array.<*>}
+     */
+    var entrieKeys = Object.keys(entries).sort(function (key1, key2) {
+      return key1.length - key2.length;
+    });
+    entrieKeys.forEach(function (name2) {
+      if(name.split('/').length > 1 && name.length > name2.length && name !== name2) {
+        var nameAry = name.split('/');
+        var name2Ary = name2.split('/');
+        var i = 0;
+        for(i = 0; i < name2Ary.length; i++) {
+          if(nameAry[i] !== name2Ary[i]) {
+            return;
+          }
+        }
+        if(i === name2Ary.length) {
+          chunks.push(name2);
+        }
+      } else if(name === name2) {
         chunks.push(name2);
       }
     })
 
-    console.log(name + ':')
-    console.log(chunks);
+    console.log(name + '：' + JSON.stringify(chunks));
 
-    // 每个页面生成一个html
+    // 每个模板生成一个 HtmlWebpackPlugin插件配置
     var plugin = new HtmlWebpackPlugin({
       // 生成出来的html文件名
       filename: name + '.html',
@@ -166,6 +186,7 @@ exports.htmlPlugins = function () {
       // 每个html引用的js模块，也可以在这里加上vendor等公用模块
       // chunks: ['manifest', 'vendor', name]
       chunks: chunks,
+      // 排序，按照数组下标排序
       chunksSortMode: function (chunk1, chunk2) {
         var order = chunks;
         var order1 = order.indexOf(chunk1.names[0]);
@@ -174,7 +195,7 @@ exports.htmlPlugins = function () {
       },
       // 发布模式打包
       minify: process.env.NODE_ENV === 'production'
-        && config.build.htmlMinify
+      && config.build.htmlMinify
         ? {
           removeComments: true,
           collapseWhitespace: false,
@@ -183,5 +204,56 @@ exports.htmlPlugins = function () {
     });
     plugins.push(plugin);
   })
+  return plugins;
+}
+
+// 处理雪碧图插件
+exports.spritePlugin = function () {
+  var myicons = glob.sync(path.resolve(__dirname, '../src/img/myicon/*'));
+  var plugins = []
+  if(myicons.length !==0) {
+    plugins.push(new SpritesmithPlugin({
+      src: {
+        cwd: path.resolve(__dirname, '../src/img/myicon'),
+        glob: '*.png'
+      },
+      target: {
+        image: path.resolve(__dirname, '../src/img/sprite.png'),
+        // css: path.resolve(__dirname, 'src/assets/sprite.css')
+        css: [[
+          path.resolve(__dirname, '../src/scss/_block/_sprite.scss'),
+          { format: 'custom_template' }
+        ]]
+      },
+      apiOptions: {
+        cssImageRef: '../img/sprite.png'
+      },
+      spritesmithOptions: {
+        algorithm: 'binary-tree'
+      },
+      customTemplates: {
+        'custom_template': function (data) {
+          var shared = [
+            '[class^="myicon-"], [class*=" myicon-"] {',
+            // '  display: inline-block;',
+            // '  vertical-align: middle;',
+            '  background-image: url(I);',
+            '}'].join("")
+            .replace('I', data.sprites[0].image);
+
+          var perSprite = data.sprites.map(function (sprite) {
+            return '.myicon-N { width: Wpx; height: Hpx; background-position: Xpx Ypx; }'
+              .replace('N', sprite.name)
+              .replace('W', sprite.width)
+              .replace('H', sprite.height)
+              .replace('X', sprite.offset_x)
+              .replace('Y', sprite.offset_y);
+          }).join('\n');
+
+          return shared + '\n' + perSprite;
+        }
+      }
+    }));
+  }
   return plugins;
 }
